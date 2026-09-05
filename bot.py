@@ -40,7 +40,6 @@ UPDATE_CHANNEL_ID = 1545725589556559924
 TEST_COMMAND_CHANNEL_ID = 1545712535377027123
 INVITE_LINK = "https://discord.gg/qWATqFHGzU"
 
-# 실제 게시판 주소로 복구
 NOTICE_URL = "https://mapleplanet.co.kr/board/notice"
 UPDATE_URL = "https://mapleplanet.co.kr/board/update"
 
@@ -51,20 +50,34 @@ ROLE_CONFIG = {
     "부주": {"pw": "5050", "role_name": "* 🥨 부주", "prefix": "* 🥨 "}
 }
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
+# Cloudflare 차단을 우회하기 위한 실제 브라우저 위장 헤더
+STEALTH_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"'
 }
 
 last_notice_title = None
 last_update_title = None
 
-# ==================== [ 초강력 크롤링 로직 ] ====================
+# ==================== [ 방화벽 우회 크롤링 로직 ] ====================
 async def fetch_board_data(session, url, keyword):
-    """클래스명에 의존하지 않고, 텍스트와 JSON 원본을 샅샅이 뒤지는 함수"""
     try:
-        async with session.get(url, headers=HEADERS, timeout=10) as response:
+        # 먼저 메인 페이지나 홈을 가볍게 두드려 쿠키를 획득한 뒤 게시판에 접근 (Cloudflare 우회 핵심)
+        async with session.get("https://mapleplanet.co.kr/", headers=STEALTH_HEADERS, timeout=10):
+            pass
+
+        async with session.get(url, headers=STEALTH_HEADERS, timeout=10) as response:
             status = response.status
             if status != 200:
                 return None, None, None, status
@@ -72,7 +85,7 @@ async def fetch_board_data(session, url, keyword):
             html = await response.text()
             soup = BeautifulSoup(html, 'html.parser')
             
-            # 1단계: <a> 태그 안의 텍스트 기반 탐색
+            # 1단계: <a> 태그 텍스트 탐색
             for a in soup.find_all('a'):
                 text = a.get_text(strip=True)
                 if keyword in text:
@@ -80,22 +93,21 @@ async def fetch_board_data(session, url, keyword):
                     link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
                     return text, link, html, status
                     
-            # 2단계: 링크가 숨겨진 <div>, <span>, <td> 텍스트 탐색
+            # 2단계: 주변 태그 텍스트 탐색
             for tag in soup.find_all(['div', 'span', 'td']):
                 text = tag.get_text(strip=True)
-                if keyword in text and len(text) < 50:
+                if keyword in text and len(text) < 60:
                     parent_a = tag.find_parent('a')
                     if parent_a:
                         href = parent_a.get('href', '')
                         link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
                         return text, link, html, status
                         
-            # 3단계: 프론트엔드 프레임워크(React/Next.js) 내부 JSON 상태 강제 추출
+            # 3단계: 소스코드 내 키워드 정규식 강제 추출
             if keyword in html:
                 title_match = re.search(rf'["\'](?:title|subject)["\']\s*:\s*["\']([^"\']*?{keyword}[^"\']*?)["\']', html)
                 if title_match:
                     title = title_match.group(1)
-                    # 제목 근처 문자열에서 ID 추출
                     start_idx = max(0, title_match.start() - 200)
                     end_idx = min(len(html), title_match.end() + 200)
                     context = html[start_idx:end_idx]
@@ -144,13 +156,13 @@ async def check_maple_planet_news():
                 await channel.send(f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})")
             last_update_title = title_up
 
-# ==================== [ 커맨드 테스트 로직 (에러 진단 포함) ] ====================
+# ==================== [ 커맨드 테스트 로직 ] ====================
 async def run_notice_test():
     async with aiohttp.ClientSession() as session:
         title, link, html, status = await fetch_board_data(session, NOTICE_URL, "점검 안내")
         if not title:
-            if status == 403: return False, "❌ [실패] Cloudflare 보안이 봇 서버(Render)의 접근을 완전히 차단했습니다. (HTTP 403)"
-            if status == 200: return False, "❌ [실패] 사이트는 열렸으나 HTML 소스코드 내에 '점검 안내' 글자가 존재하지 않습니다."
+            if status == 403: return False, "❌ [실패] 여전히 Cloudflare 보안에 의해 차단되었습니다. (HTTP 403)"
+            if status == 200: return False, "❌ [실패] 페이지는 열렸으나 '점검 안내' 글자를 찾지 못했습니다."
             return False, f"❌ [실패] 서버 통신 에러 (코드: {status})"
         
         channel = bot.get_channel(NOTICE_CHANNEL_ID)
@@ -165,8 +177,8 @@ async def run_update_test():
     async with aiohttp.ClientSession() as session:
         title, link, html, status = await fetch_board_data(session, UPDATE_URL, "패치노트")
         if not title:
-            if status == 403: return False, "❌ [실패] Cloudflare 보안이 봇 서버(Render)의 접근을 완전히 차단했습니다. (HTTP 403)"
-            if status == 200: return False, "❌ [실패] 사이트는 열렸으나 HTML 소스코드 내에 '패치노트' 글자가 존재하지 않습니다."
+            if status == 403: return False, "❌ [실패] 여전히 Cloudflare 보안에 의해 차단되었습니다. (HTTP 403)"
+            if status == 200: return False, "❌ [실패] 페이지는 열렸으나 '패치노트' 글자를 찾지 못했습니다."
             return False, f"❌ [실패] 서버 통신 에러 (코드: {status})"
         
         channel = bot.get_channel(UPDATE_CHANNEL_ID)
@@ -204,7 +216,7 @@ async def test_update_cmd(ctx):
     _, msg = await run_update_test()
     await ctx.send(msg)
 
-# ==================== [ 가입 진행 Modal & View (기존 동일) ] ====================
+# ==================== [ 가입 진행 Modal & View ] ====================
 class RegisterModal(discord.ui.Modal, title="무과금 봇 가입 진행"):
     nickname = discord.ui.TextInput(label="1. 사용하실 닉네임", required=True, max_length=15)
     role_choice = discord.ui.TextInput(label="2. 역할 (운영진 / 길드원 / 손님 / 부주)", required=True)
