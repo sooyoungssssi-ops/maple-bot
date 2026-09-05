@@ -1,9 +1,3 @@
-제공해주신 기존 코드에 Render 무료 Web Service(웹 서버 + UptimeRobot용) 24시간 가동 로직을 깔끔하게 결합한 전체 코드입니다.
-
-기존의 가입 진행 Modal, 60분 자동 추방, 크롤링 로직은 그대로 유지하면서 웹 서버 구동 코드만 상단에 추가했습니다.
-
-Render 24시간 무중단 통합 bot.py 코드
-Python
 import asyncio
 import os
 import discord
