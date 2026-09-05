@@ -2,7 +2,6 @@ import asyncio
 import os
 import re
 import aiohttp
-from bs4 import BeautifulSoup
 from aiohttp import web
 import discord
 from discord import app_commands
@@ -43,8 +42,9 @@ TEST_COMMAND_CHANNEL_ID = 1545712535377027123  # 테스트 명령어 전용 채�
 
 INVITE_LINK = "https://discord.gg/qWATqFHGzU"
 
-NOTICE_URL = "https://mapleplanet.co.kr/board/notice"
-UPDATE_URL = "https://mapleplanet.co.kr/board/update"
+# HTML 크롤링 대신 직접 내부 API 호출 (JSON 파싱)
+NOTICE_API_URL = "https://mapleplanet.co.kr/api/board/notice"
+UPDATE_API_URL = "https://mapleplanet.co.kr/api/board/update"
 
 ROLE_CONFIG = {
     "운영진": {"pw": "1540", "role_name": "! 👑 운영진", "prefix": "! 👑 "},
@@ -53,116 +53,98 @@ ROLE_CONFIG = {
     "부주": {"pw": "5050", "role_name": "* 🥨 부주", "prefix": "* 🥨 "}
 }
 
-# 브라우저 차단 방지용 헤더
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*'
 }
 
-last_notice_title = ""
-last_update_title = ""
+last_notice_id = None
+last_update_id = None
 
-# ==================== [ 공지 / 패치노트 크롤링 ] ====================
-async def fetch_latest_post(session, url):
+# ==================== [ 게시판 API 파싱 로직 ] ====================
+async def fetch_latest_post_from_api(session, api_url, target_keyword):
+    """
+    내부 API에서 목록을 받아 target_keyword가 포함된 최신 글 추출
+    """
     try:
-        async with session.get(url, headers=HEADERS, timeout=10) as response:
+        async with session.get(api_url, headers=HEADERS, timeout=10) as response:
             if response.status == 200:
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
+                data = await response.json()
                 
-                # 게시글 제목 링크를 찾기 위한 다각도 CSS 선택자
-                selectors = [
-                    'tr.notice a', '.board-list a', '.title a', 
-                    'td.subject a', 'a.subject', 'tbody tr a', '.td_subject a'
-                ]
-                
-                latest_post = None
-                for selector in selectors:
-                    posts = soup.select(selector)
-                    for post in posts:
-                        text = post.text.strip()
-                        href = post.get('href', '')
-                        # 의미 없는 단어나 댓글 수 표시는 제외
-                        if text and len(text) > 2 and 'board' in href or 'view' in href or href.startswith('/'):
-                            latest_post = post
-                            break
-                    if latest_post:
-                        break
+                # API 데이터 구조(list 혹은 dict 내 list) 자동 대응
+                posts = data if isinstance(data, list) else data.get('list', data.get('posts', data.get('data', [])))
 
-                if latest_post:
-                    title = latest_post.text.strip()
-                    # 댓글 수 같은 특수 문자 제거 (예: [3])
-                    title = re.sub(r'\[\d+\]$', '', title).strip()
-                    href = latest_post.get('href')
-                    link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
-                    return title, link
-            else:
-                print(f"웹사이트 응답 에러 ({url}): 상태 코드 {response.status}")
+                for post in posts:
+                    title = post.get('title', '').strip()
+                    post_id = post.get('id', post.get('seq', post.get('boardId', '')))
+                    
+                    # 키워드 검색 (예: "점검 안내" 또는 "패치노트")
+                    if target_keyword in title:
+                        board_type = "notice" if "notice" in api_url else "update"
+                        link = f"https://mapleplanet.co.kr/board/{board_type}/{post_id}" if post_id else f"https://mapleplanet.co.kr/board/{board_type}"
+                        
+                        # 본문 내용 추출 (점검 일시 파싱용)
+                        content = post.get('content', post.get('body', ''))
+                        return post_id, title, link, content
+
     except Exception as e:
-        print(f"크롤링 오작동 ({url}): {e}")
-    return None, None
+        print(f"API 크롤링 오류 ({api_url}): {e}")
+    
+    return None, None, None, None
 
-async def parse_maintenance_info(session, url):
-    """공지 상세 페이지에서 '일시' 항목 문구 추출"""
-    try:
-        async with session.get(url, headers=HEADERS, timeout=10) as response:
-            if response.status == 200:
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                text = soup.get_text()
-
-                lines = [line.strip() for line in text.split('\n') if line.strip()]
-                extracted_lines = []
-
-                for line in lines:
-                    if re.search(r'(무중단 패치 일시|마이그레이션 일시|점검 일시)', line):
-                        clean_line = line.replace('•', '').replace('*', '').strip()
-                        extracted_lines.append(f"- {clean_line}")
-
-                if extracted_lines:
-                    return "\n".join(extracted_lines)
-    except Exception as e:
-        print(f"상세 페이지 파싱 오류 ({url}): {e}")
-    return None
+def extract_maintenance_time(text):
+    """본문에서 '일시' 문구 추출"""
+    if not text:
+        return None
+    
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    extracted = []
+    
+    for line in lines:
+        if re.search(r'(무중단 패치 일시|마이그레이션 일시|점검 일시)', line):
+            clean_line = line.replace('•', '').replace('*', '').strip()
+            extracted.append(f"- {clean_line}")
+            
+    return "\n".join(extracted) if extracted else None
 
 @tasks.loop(minutes=3)
 async def check_maple_planet_news():
-    global last_notice_title, last_update_title
+    global last_notice_id, last_update_id
     async with aiohttp.ClientSession() as session:
-        # 1. 공지사항 (점검 안내글만 추출)
-        title, link = await fetch_latest_post(session, NOTICE_URL)
-        if title and last_notice_title and title != last_notice_title:
-            if "점검" in title:
-                channel = bot.get_channel(NOTICE_CHANNEL_ID)
-                if channel:
-                    time_info = await parse_maintenance_info(session, link)
-                    if time_info:
-                        message = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}"
-                    else:
-                        message = f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
-                    await channel.send(message)
-        if title:
-            last_notice_title = title
+        # 1. 점검 안내 공지 자동 모니터링
+        post_id, title, link, content = await fetch_latest_post_from_api(session, NOTICE_API_URL, "점검 안내")
+        if post_id and last_notice_id and post_id != last_notice_id:
+            channel = bot.get_channel(NOTICE_CHANNEL_ID)
+            if channel:
+                time_info = extract_maintenance_time(content)
+                if time_info:
+                    message = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}"
+                else:
+                    message = f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
+                await channel.send(message)
+        if post_id:
+            last_notice_id = post_id
 
-        # 2. 패치노트
-        title_up, link_up = await fetch_latest_post(session, UPDATE_URL)
-        if title_up and last_update_title and title_up != last_update_title:
+        # 2. 패치노트 자동 모니터링 ("패치노트" 들어간 모든 글 감지)
+        post_id_up, title_up, link_up, _ = await fetch_latest_post_from_api(session, UPDATE_API_URL, "패치노트")
+        if post_id_up and last_update_id and post_id_up != last_update_id:
             channel = bot.get_channel(UPDATE_CHANNEL_ID)
             if channel:
                 message = f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})"
                 await channel.send(message)
-        if title_up:
-            last_update_title = title_up
+        if post_id_up:
+            last_update_id = post_id_up
 
-# ==================== [ 공통 로직 함수 ] ====================
+# ==================== [ 공통 테스트 함수 ] ====================
 async def run_notice_test():
     async with aiohttp.ClientSession() as session:
-        title, link = await fetch_latest_post(session, NOTICE_URL)
+        post_id, title, link, content = await fetch_latest_post_from_api(session, NOTICE_API_URL, "점검 안내")
         if not title:
-            return False, "❌ 최신 공지글을 불러오지 못했습니다."
+            return False, "❌ '점검 안내' 글을 불러오지 못했습니다."
         
         channel = bot.get_channel(NOTICE_CHANNEL_ID)
         if channel:
-            time_info = await parse_maintenance_info(session, link)
+            time_info = extract_maintenance_time(content)
             if time_info:
                 message = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}"
             else:
@@ -173,9 +155,9 @@ async def run_notice_test():
 
 async def run_update_test():
     async with aiohttp.ClientSession() as session:
-        title_up, link_up = await fetch_latest_post(session, UPDATE_URL)
+        post_id_up, title_up, link_up, _ = await fetch_latest_post_from_api(session, UPDATE_API_URL, "패치노트")
         if not title_up:
-            return False, "❌ 최신 패치노트를 불러오지 못했습니다."
+            return False, "❌ '패치노트' 글을 불러오지 못했습니다."
 
         channel = bot.get_channel(UPDATE_CHANNEL_ID)
         if channel:
@@ -185,22 +167,22 @@ async def run_update_test():
         return False, "❌ 패치노트 채널을 찾을 수 없습니다."
 
 # ==================== [ 슬래시 커맨드 ] ====================
-@bot.tree.command(name="공지테스트", description="최근 점검 공지를 강제로 테스트 전송합니다.")
+@bot.tree.command(name="공지테스트", description="최근 '점검 안내' 공지를 테스트 전송합니다.")
 async def test_notice_slash(interaction: discord.Interaction):
     if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
         await interaction.response.send_message("❌ 이 명령어는 지정된 테스트 채널에서만 사용할 수 있습니다.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    success, msg = await run_notice_test()
+    _, msg = await run_notice_test()
     await interaction.followup.send(msg, ephemeral=True)
 
-@bot.tree.command(name="패치노트테스트", description="최근 패치노트를 강제로 테스트 전송합니다.")
+@bot.tree.command(name="패치노트테스트", description="최근 '패치노트' 글을 테스트 전송합니다.")
 async def test_update_slash(interaction: discord.Interaction):
     if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
         await interaction.response.send_message("❌ 이 명령어는 지정된 테스트 채널에서만 사용할 수 있습니다.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    success, msg = await run_update_test()
+    _, msg = await run_update_test()
     await interaction.followup.send(msg, ephemeral=True)
 
 # ==================== [ 일반 텍스트 명령어 (!공지테스트, !패치노트테스트) ] ====================
@@ -208,14 +190,14 @@ async def test_update_slash(interaction: discord.Interaction):
 async def test_notice_cmd(ctx):
     if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
         return
-    success, msg = await run_notice_test()
+    _, msg = await run_notice_test()
     await ctx.send(msg)
 
 @bot.command(name="패치노트테스트")
 async def test_update_cmd(ctx):
     if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
         return
-    success, msg = await run_update_test()
+    _, msg = await run_update_test()
     await ctx.send(msg)
 
 # ==================== [ 가입 진행 Modal ] ====================
@@ -318,7 +300,7 @@ class RegisterView(discord.ui.View):
 
 # ==================== [ 60분 미입력 추방 로직 ] ====================
 async def start_join_timer(member: discord.Member, channel: discord.TextChannel):
-    await asyncio.sleep(3600)  # 60분 대기
+    await asyncio.sleep(3600)
     
     guild = member.guild
     
