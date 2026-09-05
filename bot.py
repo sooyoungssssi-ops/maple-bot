@@ -38,7 +38,7 @@ class MaplePlanetBot(commands.Bot):
 bot = MaplePlanetBot()
 
 # ==================== [ 설정 값 ] ====================
-TOKEN = "MTU0NTYzMjMwMDg5NTgzNDI0Mw.G4F0cX.2xReEWJy2OLWh2J_NNnLF_xWU0MfEaPgkwzS7s"
+TOKEN = "MTU0NTYzMjMwMDg5NTgzNDI0Mw.GR7PF-.NXlvcih84IVDPyMihZf1jxb3XRdAtWK6SH2j-s"
 NOTICE_CHANNEL_ID = 1545622885610029167
 INVITE_LINK = "https://discord.gg/qWATqFHGzU"
 
