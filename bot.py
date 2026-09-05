@@ -33,8 +33,6 @@ class MaplePlanetBot(commands.Bot):
 
     async def setup_hook(self):
         asyncio.create_task(start_web_server())
-        # 슬래시 커맨드 동기화
-        await self.tree.sync()
 
 bot = MaplePlanetBot()
 
@@ -55,22 +53,50 @@ ROLE_CONFIG = {
     "부주": {"pw": "5050", "role_name": "* 🥨 부주", "prefix": "* 🥨 "}
 }
 
+# 브라우저 차단 방지용 헤더
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+
 last_notice_title = ""
 last_update_title = ""
 
 # ==================== [ 공지 / 패치노트 크롤링 ] ====================
 async def fetch_latest_post(session, url):
     try:
-        async with session.get(url, timeout=10) as response:
+        async with session.get(url, headers=HEADERS, timeout=10) as response:
             if response.status == 200:
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
-                latest_post = soup.select_one('tr.notice a, .board-list a, .title a')
+                
+                # 게시글 제목 링크를 찾기 위한 다각도 CSS 선택자
+                selectors = [
+                    'tr.notice a', '.board-list a', '.title a', 
+                    'td.subject a', 'a.subject', 'tbody tr a', '.td_subject a'
+                ]
+                
+                latest_post = None
+                for selector in selectors:
+                    posts = soup.select(selector)
+                    for post in posts:
+                        text = post.text.strip()
+                        href = post.get('href', '')
+                        # 의미 없는 단어나 댓글 수 표시는 제외
+                        if text and len(text) > 2 and 'board' in href or 'view' in href or href.startswith('/'):
+                            latest_post = post
+                            break
+                    if latest_post:
+                        break
+
                 if latest_post:
                     title = latest_post.text.strip()
+                    # 댓글 수 같은 특수 문자 제거 (예: [3])
+                    title = re.sub(r'\[\d+\]$', '', title).strip()
                     href = latest_post.get('href')
                     link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
                     return title, link
+            else:
+                print(f"웹사이트 응답 에러 ({url}): 상태 코드 {response.status}")
     except Exception as e:
         print(f"크롤링 오작동 ({url}): {e}")
     return None, None
@@ -78,7 +104,7 @@ async def fetch_latest_post(session, url):
 async def parse_maintenance_info(session, url):
     """공지 상세 페이지에서 '일시' 항목 문구 추출"""
     try:
-        async with session.get(url, timeout=10) as response:
+        async with session.get(url, headers=HEADERS, timeout=10) as response:
             if response.status == 200:
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
@@ -127,21 +153,13 @@ async def check_maple_planet_news():
         if title_up:
             last_update_title = title_up
 
-# ==================== [ 테스트 슬래시 커맨드 ] ====================
-@bot.tree.command(name="공지테스트", description="최근 점검 공지를 강제로 테스트 전송합니다.")
-async def test_notice(interaction: discord.Interaction):
-    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
-        await interaction.response.send_message("❌ 이 명령어는 지정된 테스트 채널에서만 사용할 수 있습니다.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
+# ==================== [ 공통 로직 함수 ] ====================
+async def run_notice_test():
     async with aiohttp.ClientSession() as session:
         title, link = await fetch_latest_post(session, NOTICE_URL)
         if not title:
-            await interaction.followup.send("❌ 최신 공지글을 불러오지 못했습니다.", ephemeral=True)
-            return
-
+            return False, "❌ 최신 공지글을 불러오지 못했습니다."
+        
         channel = bot.get_channel(NOTICE_CHANNEL_ID)
         if channel:
             time_info = await parse_maintenance_info(session, link)
@@ -149,33 +167,56 @@ async def test_notice(interaction: discord.Interaction):
                 message = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}"
             else:
                 message = f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
-            
             await channel.send(message)
-            await interaction.followup.send("✅ 성공적으로 점검 공지 알림을 테스트 발송했습니다.", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ 공지 채널을 찾을 수 없습니다.", ephemeral=True)
+            return True, "✅ 성공적으로 점검 공지 알림을 테스트 발송했습니다."
+        return False, "❌ 공지 채널을 찾을 수 없습니다."
 
-@bot.tree.command(name="패치노트테스트", description="최근 패치노트를 강제로 테스트 전송합니다.")
-async def test_update(interaction: discord.Interaction):
-    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
-        await interaction.response.send_message("❌ 이 명령어는 지정된 테스트 채널에서만 사용할 수 있습니다.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
+async def run_update_test():
     async with aiohttp.ClientSession() as session:
         title_up, link_up = await fetch_latest_post(session, UPDATE_URL)
         if not title_up:
-            await interaction.followup.send("❌ 최신 패치노트를 불러오지 못했습니다.", ephemeral=True)
-            return
+            return False, "❌ 최신 패치노트를 불러오지 못했습니다."
 
         channel = bot.get_channel(UPDATE_CHANNEL_ID)
         if channel:
             message = f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})"
             await channel.send(message)
-            await interaction.followup.send("✅ 성공적으로 패치노트 알림을 테스트 발송했습니다.", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ 패치노트 채널을 찾을 수 없습니다.", ephemeral=True)
+            return True, "✅ 성공적으로 패치노트 알림을 테스트 발송했습니다."
+        return False, "❌ 패치노트 채널을 찾을 수 없습니다."
+
+# ==================== [ 슬래시 커맨드 ] ====================
+@bot.tree.command(name="공지테스트", description="최근 점검 공지를 강제로 테스트 전송합니다.")
+async def test_notice_slash(interaction: discord.Interaction):
+    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
+        await interaction.response.send_message("❌ 이 명령어는 지정된 테스트 채널에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    success, msg = await run_notice_test()
+    await interaction.followup.send(msg, ephemeral=True)
+
+@bot.tree.command(name="패치노트테스트", description="최근 패치노트를 강제로 테스트 전송합니다.")
+async def test_update_slash(interaction: discord.Interaction):
+    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
+        await interaction.response.send_message("❌ 이 명령어는 지정된 테스트 채널에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    success, msg = await run_update_test()
+    await interaction.followup.send(msg, ephemeral=True)
+
+# ==================== [ 일반 텍스트 명령어 (!공지테스트, !패치노트테스트) ] ====================
+@bot.command(name="공지테스트")
+async def test_notice_cmd(ctx):
+    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
+        return
+    success, msg = await run_notice_test()
+    await ctx.send(msg)
+
+@bot.command(name="패치노트테스트")
+async def test_update_cmd(ctx):
+    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
+        return
+    success, msg = await run_update_test()
+    await ctx.send(msg)
 
 # ==================== [ 가입 진행 Modal ] ====================
 class RegisterModal(discord.ui.Modal, title="무과금 봇 가입 진행"):
@@ -323,6 +364,15 @@ async def start_join_timer(member: discord.Member, channel: discord.TextChannel)
 @bot.event
 async def on_ready():
     print(f"무과금 봇이 구동되었습니다: {bot.user.name}")
+    
+    for guild in bot.guilds:
+        try:
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print(f"[{guild.name}] 서버에 명령어 동기화 완료")
+        except Exception as e:
+            print(f"[{guild.name}] 서버 명령어 동기화 실패: {e}")
+
     if not check_maple_planet_news.is_running():
         check_maple_planet_news.start()
 
