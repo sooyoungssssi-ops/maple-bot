@@ -50,34 +50,20 @@ ROLE_CONFIG = {
     "부주": {"pw": "5050", "role_name": "* 🥨 부주", "prefix": "* 🥨 "}
 }
 
-# Cloudflare 차단을 우회하기 위한 실제 브라우저 위장 헤더
-STEALTH_HEADERS = {
+HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"'
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ko-KR,ko;q=0.9'
 }
 
 last_notice_title = None
 last_update_title = None
 
-# ==================== [ 방화벽 우회 크롤링 로직 ] ====================
+# ==================== [ 안전한 크롤링 함수 (에러 방지) ] ====================
 async def fetch_board_data(session, url, keyword):
     try:
-        # 먼저 메인 페이지나 홈을 가볍게 두드려 쿠키를 획득한 뒤 게시판에 접근 (Cloudflare 우회 핵심)
-        async with session.get("https://mapleplanet.co.kr/", headers=STEALTH_HEADERS, timeout=10):
-            pass
-
-        async with session.get(url, headers=STEALTH_HEADERS, timeout=10) as response:
+        # 타임아웃을 15초로 넉넉하게 잡고 통신 시도
+        async with session.get(url, headers=HEADERS, timeout=15, ssl=False) as response:
             status = response.status
             if status != 200:
                 return None, None, None, status
@@ -85,7 +71,7 @@ async def fetch_board_data(session, url, keyword):
             html = await response.text()
             soup = BeautifulSoup(html, 'html.parser')
             
-            # 1단계: <a> 태그 텍스트 탐색
+            # 1단계: <a> 태그 탐색
             for a in soup.find_all('a'):
                 text = a.get_text(strip=True)
                 if keyword in text:
@@ -93,7 +79,7 @@ async def fetch_board_data(session, url, keyword):
                     link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
                     return text, link, html, status
                     
-            # 2단계: 주변 태그 텍스트 탐색
+            # 2단계: 주변 태그 탐색
             for tag in soup.find_all(['div', 'span', 'td']):
                 text = tag.get_text(strip=True)
                 if keyword in text and len(text) < 60:
@@ -102,24 +88,14 @@ async def fetch_board_data(session, url, keyword):
                         href = parent_a.get('href', '')
                         link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
                         return text, link, html, status
-                        
-            # 3단계: 소스코드 내 키워드 정규식 강제 추출
-            if keyword in html:
-                title_match = re.search(rf'["\'](?:title|subject)["\']\s*:\s*["\']([^"\']*?{keyword}[^"\']*?)["\']', html)
-                if title_match:
-                    title = title_match.group(1)
-                    start_idx = max(0, title_match.start() - 200)
-                    end_idx = min(len(html), title_match.end() + 200)
-                    context = html[start_idx:end_idx]
-                    id_match = re.search(r'["\'](?:id|seq|board_id|no)["\']\s*:\s*["\']?(\d+)["\']?', context)
-                    
-                    board_type = "update" if "update" in url else "notice"
-                    link = f"https://mapleplanet.co.kr/board/{board_type}/{id_match.group(1)}" if id_match else url
-                    return title, link, html, status
 
             return None, None, html, status
+            
+    except asyncio.TimeoutError:
+        print(f"통신 시간 초과 (Timeout): {url}")
+        return None, None, None, "TIMEOUT"
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
+        print(f"크롤링 중 예외 발생 ({url}): {e}")
         return None, None, None, "ERROR"
 
 def extract_maintenance_time(html):
@@ -138,7 +114,6 @@ def extract_maintenance_time(html):
 async def check_maple_planet_news():
     global last_notice_title, last_update_title
     async with aiohttp.ClientSession() as session:
-        # 공지사항
         title, link, html, _ = await fetch_board_data(session, NOTICE_URL, "점검 안내")
         if title and title != last_notice_title:
             channel = bot.get_channel(NOTICE_CHANNEL_ID)
@@ -148,7 +123,6 @@ async def check_maple_planet_news():
                 await channel.send(msg)
             last_notice_title = title
 
-        # 패치노트
         title_up, link_up, _, _ = await fetch_board_data(session, UPDATE_URL, "패치노트")
         if title_up and title_up != last_update_title:
             channel = bot.get_channel(UPDATE_CHANNEL_ID)
@@ -161,9 +135,7 @@ async def run_notice_test():
     async with aiohttp.ClientSession() as session:
         title, link, html, status = await fetch_board_data(session, NOTICE_URL, "점검 안내")
         if not title:
-            if status == 403: return False, "❌ [실패] 여전히 Cloudflare 보안에 의해 차단되었습니다. (HTTP 403)"
-            if status == 200: return False, "❌ [실패] 페이지는 열렸으나 '점검 안내' 글자를 찾지 못했습니다."
-            return False, f"❌ [실패] 서버 통신 에러 (코드: {status})"
+            return False, f"❌ [실패] 통신 상태 코드: {status} (사이트 접근이 거부되었거나 응답이 없습니다)"
         
         channel = bot.get_channel(NOTICE_CHANNEL_ID)
         if channel:
@@ -177,9 +149,7 @@ async def run_update_test():
     async with aiohttp.ClientSession() as session:
         title, link, html, status = await fetch_board_data(session, UPDATE_URL, "패치노트")
         if not title:
-            if status == 403: return False, "❌ [실패] 여전히 Cloudflare 보안에 의해 차단되었습니다. (HTTP 403)"
-            if status == 200: return False, "❌ [실패] 페이지는 열렸으나 '패치노트' 글자를 찾지 못했습니다."
-            return False, f"❌ [실패] 서버 통신 에러 (코드: {status})"
+            return False, f"❌ [실패] 통신 상태 코드: {status} (사이트 접근이 거부되었거나 응답이 없습니다)"
         
         channel = bot.get_channel(UPDATE_CHANNEL_ID)
         if channel:
