@@ -38,7 +38,6 @@ class MaplePlanetBot(commands.Bot):
 bot = MaplePlanetBot()
 
 # ==================== [ 설정 값 ] ====================
-TOKEN = "MTU0NTYzMjMwMDg5NTgzNDI0Mw.Gzq9mb.4CnpkSHumKJ6QA1zLDELlPzOVApHyVy8vepCts"
 NOTICE_CHANNEL_ID = 1545622885610029167
 INVITE_LINK = "https://discord.gg/qWATqFHGzU"
 
@@ -287,4 +286,7 @@ async def on_member_remove(member: discord.Member):
 
 # ==================== [ 실행 ] ====================
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        raise ValueError("Render의 Environment 항목에 DISCORD_TOKEN을 설정해야 합니다.")
+    bot.run(token)
