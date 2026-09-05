@@ -1,9 +1,11 @@
 import asyncio
 import os
+import re
 import aiohttp
 from bs4 import BeautifulSoup
 from aiohttp import web
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 # ==================== [ 0. Render 무료 가동용 웹 서버 ] ====================
@@ -31,11 +33,16 @@ class MaplePlanetBot(commands.Bot):
 
     async def setup_hook(self):
         asyncio.create_task(start_web_server())
+        # 슬래시 커맨드 동기화
+        await self.tree.sync()
 
 bot = MaplePlanetBot()
 
 # ==================== [ 설정 값 ] ====================
-NOTICE_CHANNEL_ID = 1545622885610029167
+NOTICE_CHANNEL_ID = 1545622885610029167   # 점검 안내 공지 채널 ID
+UPDATE_CHANNEL_ID = 1545725589556559924   # 패치노트 알림 채널 ID
+TEST_COMMAND_CHANNEL_ID = 1545712535377027123  # 테스트 명령어 전용 채널 ID
+
 INVITE_LINK = "https://discord.gg/qWATqFHGzU"
 
 NOTICE_URL = "https://mapleplanet.co.kr/board/notice"
@@ -51,7 +58,7 @@ ROLE_CONFIG = {
 last_notice_title = ""
 last_update_title = ""
 
-# ==================== [ 공지 / 패치노트 크롤링 & 알림 ] ====================
+# ==================== [ 공지 / 패치노트 크롤링 ] ====================
 async def fetch_latest_post(session, url):
     try:
         async with session.get(url, timeout=10) as response:
@@ -68,29 +75,107 @@ async def fetch_latest_post(session, url):
         print(f"크롤링 오작동 ({url}): {e}")
     return None, None
 
+async def parse_maintenance_info(session, url):
+    """공지 상세 페이지에서 '일시' 항목 문구 추출"""
+    try:
+        async with session.get(url, timeout=10) as response:
+            if response.status == 200:
+                html = await response.text()
+                soup = BeautifulSoup(html, 'html.parser')
+                text = soup.get_text()
+
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                extracted_lines = []
+
+                for line in lines:
+                    if re.search(r'(무중단 패치 일시|마이그레이션 일시|점검 일시)', line):
+                        clean_line = line.replace('•', '').replace('*', '').strip()
+                        extracted_lines.append(f"- {clean_line}")
+
+                if extracted_lines:
+                    return "\n".join(extracted_lines)
+    except Exception as e:
+        print(f"상세 페이지 파싱 오류 ({url}): {e}")
+    return None
+
 @tasks.loop(minutes=3)
 async def check_maple_planet_news():
     global last_notice_title, last_update_title
     async with aiohttp.ClientSession() as session:
-        # 1. 새 공지사항 확인
+        # 1. 공지사항 (점검 안내글만 추출)
         title, link = await fetch_latest_post(session, NOTICE_URL)
         if title and last_notice_title and title != last_notice_title:
-            channel = bot.get_channel(NOTICE_CHANNEL_ID)
-            if channel:
-                # @everyone 멘션을 포함하여 전체 알림 발송
-                await channel.send(f"@everyone 📢 **[메이플 플래닛 새 공지사항]**\n**제목:** {title}\n🔗 {link}")
+            if "점검" in title:
+                channel = bot.get_channel(NOTICE_CHANNEL_ID)
+                if channel:
+                    time_info = await parse_maintenance_info(session, link)
+                    if time_info:
+                        message = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}"
+                    else:
+                        message = f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
+                    await channel.send(message)
         if title:
             last_notice_title = title
 
-        # 2. 새 패치노트 확인
+        # 2. 패치노트
         title_up, link_up = await fetch_latest_post(session, UPDATE_URL)
         if title_up and last_update_title and title_up != last_update_title:
-            channel = bot.get_channel(NOTICE_CHANNEL_ID)
+            channel = bot.get_channel(UPDATE_CHANNEL_ID)
             if channel:
-                # @everyone 멘션을 포함하여 전체 알림 발송
-                await channel.send(f"@everyone 🛠️ **[메이플 플래닛 새 패치노트]**\n**제목:** {title_up}\n🔗 {link_up}")
+                message = f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})"
+                await channel.send(message)
         if title_up:
             last_update_title = title_up
+
+# ==================== [ 테스트 슬래시 커맨드 ] ====================
+@bot.tree.command(name="공지테스트", description="최근 점검 공지를 강제로 테스트 전송합니다.")
+async def test_notice(interaction: discord.Interaction):
+    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
+        await interaction.response.send_message("❌ 이 명령어는 지정된 테스트 채널에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with aiohttp.ClientSession() as session:
+        title, link = await fetch_latest_post(session, NOTICE_URL)
+        if not title:
+            await interaction.followup.send("❌ 최신 공지글을 불러오지 못했습니다.", ephemeral=True)
+            return
+
+        channel = bot.get_channel(NOTICE_CHANNEL_ID)
+        if channel:
+            time_info = await parse_maintenance_info(session, link)
+            if time_info:
+                message = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}"
+            else:
+                message = f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
+            
+            await channel.send(message)
+            await interaction.followup.send("✅ 성공적으로 점검 공지 알림을 테스트 발송했습니다.", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ 공지 채널을 찾을 수 없습니다.", ephemeral=True)
+
+@bot.tree.command(name="패치노트테스트", description="최근 패치노트를 강제로 테스트 전송합니다.")
+async def test_update(interaction: discord.Interaction):
+    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
+        await interaction.response.send_message("❌ 이 명령어는 지정된 테스트 채널에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with aiohttp.ClientSession() as session:
+        title_up, link_up = await fetch_latest_post(session, UPDATE_URL)
+        if not title_up:
+            await interaction.followup.send("❌ 최신 패치노트를 불러오지 못했습니다.", ephemeral=True)
+            return
+
+        channel = bot.get_channel(UPDATE_CHANNEL_ID)
+        if channel:
+            message = f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})"
+            await channel.send(message)
+            await interaction.followup.send("✅ 성공적으로 패치노트 알림을 테스트 발송했습니다.", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ 패치노트 채널을 찾을 수 없습니다.", ephemeral=True)
 
 # ==================== [ 가입 진행 Modal ] ====================
 class RegisterModal(discord.ui.Modal, title="무과금 봇 가입 진행"):
