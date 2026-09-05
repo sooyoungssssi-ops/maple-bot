@@ -1,10 +1,10 @@
 import asyncio
 import os
-import discord
-from discord.ext import commands, tasks
 import aiohttp
 from bs4 import BeautifulSoup
 from aiohttp import web
+import discord
+from discord.ext import commands, tasks
 
 # ==================== [ 0. Render 무료 가동용 웹 서버 ] ====================
 async def handle(request):
@@ -26,13 +26,11 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-# 웹 서버 연동을 위해 Custom Bot 클래스로 정의
 class MaplePlanetBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # 봇 가동 시 백그라운드 웹 서버 함께 구동
         asyncio.create_task(start_web_server())
 
 bot = MaplePlanetBot()
@@ -189,14 +187,32 @@ class RegisterView(discord.ui.View):
     async def register_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RegisterModal())
 
-# ==================== [ 60분 미입력 추방 로직 ] ====================
+# ==================== [ 60분 미입력 추방 로직 (수정됨) ] ====================
 async def start_join_timer(member: discord.Member, channel: discord.TextChannel):
-    await asyncio.sleep(3600)
+    await asyncio.sleep(3600)  # 60분 대기
+    
+    guild = member.guild
     
     try:
-        check_channel = await member.guild.fetch_channel(channel.id)
+        # 최신 멤버 정보를 다시 불러옴 (역할 변경 상태 반영 목적)
+        current_member = await guild.fetch_member(member.id)
     except discord.NotFound:
+        # 이미 유저가 나갔다면 타이머 종료
         return
+
+    # 유저에게 부여된 역할이 @everyone 외에 존재하는지 확인 (즉, 가입 성공 유무)
+    target_role_names = [cfg["role_name"] for cfg in ROLE_CONFIG.values()]
+    has_registered_role = any(role.name in target_role_names for role in current_member.roles)
+
+    # 1. 만약 가입 완료하여 권한/역할을 세팅받은 유저라면 추방 제외
+    if has_registered_role:
+        return
+
+    # 2. 60분 동안 가입을 마치지 못한 경우에만 추방 진행
+    try:
+        check_channel = await guild.fetch_channel(channel.id)
+    except discord.NotFound:
+        check_channel = None
 
     if check_channel:
         try:
@@ -204,19 +220,19 @@ async def start_join_timer(member: discord.Member, channel: discord.TextChannel)
                 description=(
                     "📝 가입절차 사용 시간이 60분을 초과하여\n"
                     "- 서버에서 자동으로 나가졌습니다.\n"
-                    "📝 다시 가입을 진행 해주시길 바랍니다.\n"
+                    "- 다시 가입을 진행 해주시길 바랍니다.\n"
                     "🌱┃가입하기 채널에서 '💡 가입진행' 버튼 클릭 해주세요."
                 ),
                 color=discord.Color.light_grey()
             )
-            await member.send(embed=dm_embed)
-            await member.send(content=INVITE_LINK)
+            await current_member.send(embed=dm_embed)
+            await current_member.send(content=INVITE_LINK)
         except Exception as e:
             print(f"DM 전송 실패: {e}")
 
         try:
-            await channel.delete()
-            await member.kick(reason="가입 시간 60분 초과 자동 추방")
+            await check_channel.delete()
+            await current_member.kick(reason="가입 시간 60분 초과 자동 추방")
         except Exception as e:
             print(f"추방 처리 중 오류: {e}")
 
