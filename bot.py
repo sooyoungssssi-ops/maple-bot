@@ -8,7 +8,6 @@ from discord.ext import commands, tasks
 
 # ==================== [ 0. Render 무료 가동용 웹 서버 ] ====================
 async def handle(request):
-    # UptimeRobot이 5분마다 신호를 보내 서버가 잠드는 것을 방지합니다.
     return web.Response(text="Maple Planet Bot is Running 24/7!")
 
 async def start_web_server():
@@ -52,7 +51,7 @@ ROLE_CONFIG = {
 last_notice_title = ""
 last_update_title = ""
 
-# ==================== [ 공지 / 패치노트 크롤링 ] ====================
+# ==================== [ 공지 / 패치노트 크롤링 & 알림 ] ====================
 async def fetch_latest_post(session, url):
     try:
         async with session.get(url, timeout=10) as response:
@@ -73,19 +72,23 @@ async def fetch_latest_post(session, url):
 async def check_maple_planet_news():
     global last_notice_title, last_update_title
     async with aiohttp.ClientSession() as session:
+        # 1. 새 공지사항 확인
         title, link = await fetch_latest_post(session, NOTICE_URL)
         if title and last_notice_title and title != last_notice_title:
             channel = bot.get_channel(NOTICE_CHANNEL_ID)
             if channel:
-                await channel.send(f"📢 **[메이플 플래닛 새 공지사항]**\n**제목:** {title}\n🔗 {link}")
+                # @everyone 멘션을 포함하여 전체 알림 발송
+                await channel.send(f"@everyone 📢 **[메이플 플래닛 새 공지사항]**\n**제목:** {title}\n🔗 {link}")
         if title:
             last_notice_title = title
 
+        # 2. 새 패치노트 확인
         title_up, link_up = await fetch_latest_post(session, UPDATE_URL)
         if title_up and last_update_title and title_up != last_update_title:
             channel = bot.get_channel(NOTICE_CHANNEL_ID)
             if channel:
-                await channel.send(f"🛠️ **[메이플 플래닛 새 패치노트]**\n**제목:** {title_up}\n🔗 {link_up}")
+                # @everyone 멘션을 포함하여 전체 알림 발송
+                await channel.send(f"@everyone 🛠️ **[메이플 플래닛 새 패치노트]**\n**제목:** {title_up}\n🔗 {link_up}")
         if title_up:
             last_update_title = title_up
 
@@ -187,28 +190,23 @@ class RegisterView(discord.ui.View):
     async def register_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RegisterModal())
 
-# ==================== [ 60분 미입력 추방 로직 (수정됨) ] ====================
+# ==================== [ 60분 미입력 추방 로직 ] ====================
 async def start_join_timer(member: discord.Member, channel: discord.TextChannel):
     await asyncio.sleep(3600)  # 60분 대기
     
     guild = member.guild
     
     try:
-        # 최신 멤버 정보를 다시 불러옴 (역할 변경 상태 반영 목적)
         current_member = await guild.fetch_member(member.id)
     except discord.NotFound:
-        # 이미 유저가 나갔다면 타이머 종료
         return
 
-    # 유저에게 부여된 역할이 @everyone 외에 존재하는지 확인 (즉, 가입 성공 유무)
     target_role_names = [cfg["role_name"] for cfg in ROLE_CONFIG.values()]
     has_registered_role = any(role.name in target_role_names for role in current_member.roles)
 
-    # 1. 만약 가입 완료하여 권한/역할을 세팅받은 유저라면 추방 제외
     if has_registered_role:
         return
 
-    # 2. 60분 동안 가입을 마치지 못한 경우에만 추방 진행
     try:
         check_channel = await guild.fetch_channel(channel.id)
     except discord.NotFound:
