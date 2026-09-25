@@ -21,20 +21,7 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-# ==================== [ 기본 설정 ] ====================
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-
-class MaplePlanetBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
-
-    async def setup_hook(self):
-        asyncio.create_task(start_web_server())
-
-bot = MaplePlanetBot()
-
+# ==================== [ 설정 값 & 역할 정의 ] ====================
 NOTICE_CHANNEL_ID = 1545622885610029167
 UPDATE_CHANNEL_ID = 1545725589556559924
 TEST_COMMAND_CHANNEL_ID = 1545712535377027123
@@ -59,10 +46,75 @@ HEADERS = {
 last_notice_title = None
 last_update_title = None
 
-# ==================== [ 안전한 크롤링 함수 (에러 방지) ] ====================
+# ==================== [ 가입 진행 Modal & View (영구 뷰용 선언) ] ====================
+class RegisterModal(discord.ui.Modal, title="무과금 봇 가입 진행"):
+    nickname = discord.ui.TextInput(label="1. 사용하실 닉네임", required=True, max_length=15)
+    role_choice = discord.ui.TextInput(label="2. 역할 (운영진 / 길드원 / 손님 / 부주)", required=True)
+    job_or_main = discord.ui.TextInput(label="3. 직업 (부주는 본주 캐릭터명 작성)", required=False, max_length=15)
+    password = discord.ui.TextInput(label="4. 비밀번호 입력", required=True, style=discord.TextStyle.short)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user_nick = self.nickname.value.strip()
+        user_role = self.role_choice.value.strip()
+        user_job = self.job_or_main.value.strip()
+        user_pw = self.password.value.strip()
+
+        if user_role not in ROLE_CONFIG:
+            return await interaction.response.send_message("❌ 역할을 잘못 입력하셨습니다.", ephemeral=True)
+        config = ROLE_CONFIG[user_role]
+        if user_pw != config["pw"]:
+            return await interaction.response.send_message("❌ 비밀번호가 올바르지 않습니다.", ephemeral=True)
+        if user_role == "부주" and not user_job:
+            return await interaction.response.send_message("❌ 부주 역할은 본주 캐릭터명을 입력해야 합니다.", ephemeral=True)
+
+        if user_role == "부주":
+            formatted_nick = f"{config['prefix']}{user_nick}({user_job}부주)"
+        else:
+            formatted_nick = f"{config['prefix']}{user_nick}({user_job})" if user_job else f"{config['prefix']}{user_nick}"
+        
+        formatted_nick = formatted_nick[:32]
+        member = interaction.user
+        target_role = discord.utils.get(interaction.guild.roles, name=config["role_name"])
+
+        try:
+            await member.edit(nick=formatted_nick)
+            if target_role:
+                await member.add_roles(target_role)
+            await interaction.response.send_message(f"✅ 가입 완료! 프로필: **{formatted_nick}**", ephemeral=True)
+            await asyncio.sleep(3)
+            await interaction.channel.delete()
+        except discord.Forbidden:
+            await interaction.response.send_message("⚠️ 권한 오류: 봇 역할을 위로 올려주세요.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"오류: {e}", ephemeral=True)
+
+class RegisterView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="가입진행", style=discord.ButtonStyle.success, emoji="💡", custom_id="register_btn")
+    async def register_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RegisterModal())
+
+# ==================== [ 기본 설정 및 Bot 클래스 ] ====================
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
+class MaplePlanetBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self):
+        asyncio.create_task(start_web_server())
+        # 봇이 재부팅되어도 기존에 떠 있던 가입 버튼이 끊기지 않고 동작하도록 영구 등록
+        self.add_view(RegisterView())
+
+bot = MaplePlanetBot()
+
+# ==================== [ 안전한 크롤링 함수 ] ====================
 async def fetch_board_data(session, url, keyword):
     try:
-        # 타임아웃을 15초로 넉넉하게 잡고 통신 시도
         async with session.get(url, headers=HEADERS, timeout=15, ssl=False) as response:
             status = response.status
             if status != 200:
@@ -71,7 +123,6 @@ async def fetch_board_data(session, url, keyword):
             html = await response.text()
             soup = BeautifulSoup(html, 'html.parser')
             
-            # 1단계: <a> 태그 탐색
             for a in soup.find_all('a'):
                 text = a.get_text(strip=True)
                 if keyword in text:
@@ -79,7 +130,6 @@ async def fetch_board_data(session, url, keyword):
                     link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
                     return text, link, html, status
                     
-            # 2단계: 주변 태그 탐색
             for tag in soup.find_all(['div', 'span', 'td']):
                 text = tag.get_text(strip=True)
                 if keyword in text and len(text) < 60:
@@ -99,7 +149,8 @@ async def fetch_board_data(session, url, keyword):
         return None, None, None, "ERROR"
 
 def extract_maintenance_time(html):
-    if not html: return None
+    if not html:
+        return None
     soup = BeautifulSoup(html, 'html.parser')
     text = soup.get_text(separator='\n')
     lines = [line.strip() for line in text.split('\n') if line.strip()]
@@ -176,62 +227,19 @@ async def test_update_slash(interaction: discord.Interaction):
 
 @bot.command(name="공지테스트")
 async def test_notice_cmd(ctx):
-    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID: return
+    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
+        return
     _, msg = await run_notice_test()
     await ctx.send(msg)
 
 @bot.command(name="패치노트테스트")
 async def test_update_cmd(ctx):
-    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID: return
+    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
+        return
     _, msg = await run_update_test()
     await ctx.send(msg)
 
-# ==================== [ 가입 진행 Modal & View ] ====================
-class RegisterModal(discord.ui.Modal, title="무과금 봇 가입 진행"):
-    nickname = discord.ui.TextInput(label="1. 사용하실 닉네임", required=True, max_length=15)
-    role_choice = discord.ui.TextInput(label="2. 역할 (운영진 / 길드원 / 손님 / 부주)", required=True)
-    job_or_main = discord.ui.TextInput(label="3. 직업 (부주는 본주 캐릭터명 작성)", required=False, max_length=15)
-    password = discord.ui.TextInput(label="4. 비밀번호 입력", required=True, style=discord.TextStyle.short)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user_nick = self.nickname.value.strip()
-        user_role = self.role_choice.value.strip()
-        user_job = self.job_or_main.value.strip()
-        user_pw = self.password.value.strip()
-
-        if user_role not in ROLE_CONFIG:
-            return await interaction.response.send_message("❌ 역할을 잘못 입력하셨습니다.", ephemeral=True)
-        config = ROLE_CONFIG[user_role]
-        if user_pw != config["pw"]:
-            return await interaction.response.send_message("❌ 비밀번호가 올바르지 않습니다.", ephemeral=True)
-        if user_role == "부주" and not user_job:
-            return await interaction.response.send_message("❌ 부주 역할은 본주 캐릭터명을 입력해야 합니다.", ephemeral=True)
-
-        if user_role == "부주": formatted_nick = f"{config['prefix']}{user_nick}({user_job}부주)"
-        else: formatted_nick = f"{config['prefix']}{user_nick}({user_job})" if user_job else f"{config['prefix']}{user_nick}"
-        
-        formatted_nick = formatted_nick[:32]
-        member = interaction.user
-        target_role = discord.utils.get(interaction.guild.roles, name=config["role_name"])
-
-        try:
-            await member.edit(nick=formatted_nick)
-            if target_role: await member.add_roles(target_role)
-            await interaction.response.send_message(f"✅ 가입 완료! 프로필: **{formatted_nick}**", ephemeral=True)
-            await asyncio.sleep(3)
-            await interaction.channel.delete()
-        except discord.Forbidden:
-            await interaction.response.send_message("⚠️ 권한 오류: 봇 역할을 위로 올려주세요.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"오류: {e}", ephemeral=True)
-
-class RegisterView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    @discord.ui.button(label="가입진행", style=discord.ButtonStyle.success, emoji="💡", custom_id="register_btn")
-    async def register_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RegisterModal())
-
+# ==================== [ 60분 미입력 추방 타이머 ] ====================
 async def start_join_timer(member: discord.Member, channel: discord.TextChannel):
     await asyncio.sleep(3600)
     try:
@@ -239,10 +247,13 @@ async def start_join_timer(member: discord.Member, channel: discord.TextChannel)
     except discord.NotFound:
         return
     has_registered = any(role.name in [cfg["role_name"] for cfg in ROLE_CONFIG.values()] for role in current_member.roles)
-    if has_registered: return
+    if has_registered:
+        return
 
-    try: check_channel = await member.guild.fetch_channel(channel.id)
-    except discord.NotFound: check_channel = None
+    try:
+        check_channel = await member.guild.fetch_channel(channel.id)
+    except discord.NotFound:
+        check_channel = None
 
     if check_channel:
         try:
@@ -262,7 +273,8 @@ async def on_ready():
         try:
             bot.tree.copy_global_to(guild=guild)
             await bot.tree.sync(guild=guild)
-        except Exception: pass
+        except Exception:
+            pass
     if not check_maple_planet_news.is_running():
         check_maple_planet_news.start()
 
@@ -287,9 +299,15 @@ async def on_member_join(member: discord.Member):
 async def on_member_remove(member: discord.Member):
     for channel in member.guild.text_channels:
         if channel.name == "🌱┃가입하기" and member in channel.overwrites:
-            try: await channel.delete()
-            except Exception: pass
+            try:
+                await channel.delete()
+            except Exception:
+                pass
             break
 
+# ==================== [ 실행 ] ====================
 if __name__ == "__main__":
-    bot.run(os.environ.get("DISCORD_TOKEN"))
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        raise ValueError("Render의 Environment에 DISCORD_TOKEN을 설정해야 합니다.")
+    bot.run(token)
