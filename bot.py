@@ -46,7 +46,7 @@ HEADERS = {
 last_notice_title = None
 last_update_title = None
 
-# ==================== [ 가입 진행 Modal & View (영구 뷰용 선언) ] ====================
+# ==================== [ 가입 진행 Modal & View ] ====================
 class RegisterModal(discord.ui.Modal, title="무과금 봇 가입 진행"):
     nickname = discord.ui.TextInput(label="1. 사용하실 닉네임", required=True, max_length=15)
     role_choice = discord.ui.TextInput(label="2. 역할 (운영진 / 길드원 / 손님 / 부주)", required=True)
@@ -107,7 +107,6 @@ class MaplePlanetBot(commands.Bot):
 
     async def setup_hook(self):
         asyncio.create_task(start_web_server())
-        # 봇이 재부팅되어도 기존에 떠 있던 가입 버튼이 끊기지 않고 동작하도록 영구 등록
         self.add_view(RegisterView())
 
 bot = MaplePlanetBot()
@@ -161,32 +160,49 @@ def extract_maintenance_time(html):
             extracted.append(f"- {clean_line}")
     return "\n".join(extracted) if extracted else None
 
+# ==================== [ 영구 생존 루프 보완 ] ====================
 @tasks.loop(minutes=3)
 async def check_maple_planet_news():
     global last_notice_title, last_update_title
-    async with aiohttp.ClientSession() as session:
-        title, link, html, _ = await fetch_board_data(session, NOTICE_URL, "점검 안내")
-        if title and title != last_notice_title:
-            channel = bot.get_channel(NOTICE_CHANNEL_ID)
-            if channel:
-                time_info = extract_maintenance_time(html)
-                msg = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}" if time_info else f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
-                await channel.send(msg)
-            last_notice_title = title
+    try:
+        async with aiohttp.ClientSession() as session:
+            # 1. 점검 공지 확인
+            title, link, html, _ = await fetch_board_data(session, NOTICE_URL, "점검 안내")
+            if title and title != last_notice_title:
+                channel = bot.get_channel(NOTICE_CHANNEL_ID)
+                if channel:
+                    time_info = extract_maintenance_time(html)
+                    msg = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}" if time_info else f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
+                    await channel.send(msg)
+                last_notice_title = title
 
-        title_up, link_up, _, _ = await fetch_board_data(session, UPDATE_URL, "패치노트")
-        if title_up and title_up != last_update_title:
-            channel = bot.get_channel(UPDATE_CHANNEL_ID)
-            if channel:
-                await channel.send(f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})")
-            last_update_title = title_up
+            # 2. 패치노트 확인
+            title_up, link_up, _, _ = await fetch_board_data(session, UPDATE_URL, "패치노트")
+            if title_up and title_up != last_update_title:
+                channel = bot.get_channel(UPDATE_CHANNEL_ID)
+                if channel:
+                    await channel.send(f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})")
+                last_update_title = title_up
+    except Exception as e:
+        print(f"[루프 방어 로그] 에러 발생(루프 유지됨): {e}")
+
+@check_maple_planet_news.before_loop
+async def before_check():
+    await bot.wait_until_ready()
+
+@check_maple_planet_news.error
+async def news_error_handler(error):
+    print(f"[루프 강제 재가동]: {error}")
+    await asyncio.sleep(10)
+    if not check_maple_planet_news.is_running():
+        check_maple_planet_news.restart()
 
 # ==================== [ 커맨드 테스트 로직 ] ====================
 async def run_notice_test():
     async with aiohttp.ClientSession() as session:
         title, link, html, status = await fetch_board_data(session, NOTICE_URL, "점검 안내")
         if not title:
-            return False, f"❌ [실패] 통신 상태 코드: {status} (사이트 접근이 거부되었거나 응답이 없습니다)"
+            return False, f"❌ [실패] 통신 상태 코드: {status} (사이트 접근 거부 또는 응답 없음)"
         
         channel = bot.get_channel(NOTICE_CHANNEL_ID)
         if channel:
@@ -200,7 +216,7 @@ async def run_update_test():
     async with aiohttp.ClientSession() as session:
         title, link, html, status = await fetch_board_data(session, UPDATE_URL, "패치노트")
         if not title:
-            return False, f"❌ [실패] 통신 상태 코드: {status} (사이트 접근이 거부되었거나 응답이 없습니다)"
+            return False, f"❌ [실패] 통신 상태 코드: {status} (사이트 접근 거부 또는 응답 없음)"
         
         channel = bot.get_channel(UPDATE_CHANNEL_ID)
         if channel:
