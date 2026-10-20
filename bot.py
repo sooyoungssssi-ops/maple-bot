@@ -255,6 +255,51 @@ async def test_update_cmd(ctx):
     _, msg = await run_update_test()
     await ctx.send(msg)
 
+# ==================== [ 봇 복구 및 상태 확인 커맨드 (추가됨) ] ====================
+async def run_refresh_bot():
+    """크롤링 루프를 강제로 재시작하는 복구 로직"""
+    try:
+        if check_maple_planet_news.is_running():
+            check_maple_planet_news.cancel()
+        await asyncio.sleep(1)
+        check_maple_planet_news.start()
+        return True, "🔄 봇의 백그라운드 크롤링 루프가 성공적으로 재시작되었습니다!"
+    except Exception as e:
+        return False, f"❌ 복구 중 오류 발생: {e}"
+
+@bot.tree.command(name="봇새로고침", description="먹통이 된 봇의 루프 및 백그라운드 작업을 재시작합니다.")
+async def refresh_bot_slash(interaction: discord.Interaction):
+    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
+        return await interaction.response.send_message("❌ 테스트 채널 전용입니다.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    _, msg = await run_refresh_bot()
+    await interaction.followup.send(msg, ephemeral=True)
+
+@bot.command(name="봇새로고침")
+async def refresh_bot_cmd(ctx):
+    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
+        return
+    _, msg = await run_refresh_bot()
+    await ctx.send(msg)
+
+@bot.tree.command(name="봇상태", description="현재 봇의 백그라운드 루프 실행 여부를 확인합니다.")
+async def bot_status_slash(interaction: discord.Interaction):
+    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
+        return await interaction.response.send_message("❌ 테스트 채널 전용입니다.", ephemeral=True)
+    is_running = check_maple_planet_news.is_running()
+    status_text = "🟢 정상 작동 중 (루프 실행 중)" if is_running else "🔴 먹통 상태 (루프 멈춤)"
+    embed = discord.Embed(title="🤖 봇 상태 확인", description=status_text, color=discord.Color.green() if is_running else discord.Color.red())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.command(name="봇상태")
+async def bot_status_cmd(ctx):
+    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
+        return
+    is_running = check_maple_planet_news.is_running()
+    status_text = "🟢 정상 작동 중 (루프 실행 중)" if is_running else "🔴 먹통 상태 (루프 멈춤)"
+    embed = discord.Embed(title="🤖 봇 상태 확인", description=status_text, color=discord.Color.green() if is_running else discord.Color.red())
+    await ctx.send(embed=embed)
+
 # ==================== [ 60분 미입력 추방 타이머 ] ====================
 async def start_join_timer(member: discord.Member, channel: discord.TextChannel):
     await asyncio.sleep(3600)
