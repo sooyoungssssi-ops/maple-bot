@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import aiohttp
+import cloudscraper  # 클라우드플레어 우회용 라이브러리
 from bs4 import BeautifulSoup
 from aiohttp import web
 import discord
@@ -35,12 +36,6 @@ ROLE_CONFIG = {
     "길드원": {"pw": "5050", "role_name": "- 🔵 길드원", "prefix": "- 🔵 "},
     "손님": {"pw": "777", "role_name": "- 🟡 손님", "prefix": "- 🟡 "},
     "부주": {"pw": "5050", "role_name": "* 🥨 부주", "prefix": "* 🥨 "}
-}
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9'
 }
 
 last_notice_title = None
@@ -111,41 +106,43 @@ class MaplePlanetBot(commands.Bot):
 
 bot = MaplePlanetBot()
 
-# ==================== [ 안전한 크롤링 함수 ] ====================
-async def fetch_board_data(session, url, keyword):
+# ==================== [ Cloudflare 우회 크롤링 함수 ] ====================
+def fetch_board_data_sync(url, keyword):
+    """동기 방식이지만 cloudscraper를 이용해 클라우드플레어를 우회합니다."""
     try:
-        async with session.get(url, headers=HEADERS, timeout=15, ssl=False) as response:
-            status = response.status
-            if status != 200:
-                return None, None, None, status
-            
-            html = await response.text()
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            for a in soup.find_all('a'):
-                text = a.get_text(strip=True)
-                if keyword in text:
-                    href = a.get('href', '')
+        scraper = cloudscraper.create_scraper()
+        response = scraper.get(url, timeout=15)
+        status = response.status_code
+        if status != 200:
+            return None, None, None, status
+        
+        html = response.text
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        for a in soup.find_all('a'):
+            text = a.get_text(strip=True)
+            if keyword in text:
+                href = a.get('href', '')
+                link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
+                return text, link, html, status
+                
+        for tag in soup.find_all(['div', 'span', 'td']):
+            text = tag.get_text(strip=True)
+            if keyword in text and len(text) < 60:
+                parent_a = tag.find_parent('a')
+                if parent_a:
+                    href = parent_a.get('href', '')
                     link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
                     return text, link, html, status
-                    
-            for tag in soup.find_all(['div', 'span', 'td']):
-                text = tag.get_text(strip=True)
-                if keyword in text and len(text) < 60:
-                    parent_a = tag.find_parent('a')
-                    if parent_a:
-                        href = parent_a.get('href', '')
-                        link = href if href.startswith('http') else f"https://mapleplanet.co.kr{href}"
-                        return text, link, html, status
 
-            return None, None, html, status
-            
-    except asyncio.TimeoutError:
-        print(f"통신 시간 초과 (Timeout): {url}")
-        return None, None, None, "TIMEOUT"
+        return None, None, html, status
     except Exception as e:
         print(f"크롤링 중 예외 발생 ({url}): {e}")
         return None, None, None, "ERROR"
+
+async def fetch_board_data(url, keyword):
+    """비동기 환경에서 안전하게 호출하기 위해 래핑"""
+    return await asyncio.to_thread(fetch_board_data_sync, url, keyword)
 
 def extract_maintenance_time(html):
     if not html:
@@ -161,28 +158,27 @@ def extract_maintenance_time(html):
     return "\n".join(extracted) if extracted else None
 
 # ==================== [ 영구 생존 루프 보완 ] ====================
-@tasks.loop(minutes=3)
+@tasks.loop(minutes=5)  # 요청 빈도를 줄여 차단(Rate Limit)을 예방합니다 (3분 -> 5분)
 async def check_maple_planet_news():
     global last_notice_title, last_update_title
     try:
-        async with aiohttp.ClientSession() as session:
-            # 1. 점검 공지 확인
-            title, link, html, _ = await fetch_board_data(session, NOTICE_URL, "점검 안내")
-            if title and title != last_notice_title:
-                channel = bot.get_channel(NOTICE_CHANNEL_ID)
-                if channel:
-                    time_info = extract_maintenance_time(html)
-                    msg = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}" if time_info else f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
-                    await channel.send(msg)
-                last_notice_title = title
+        # 1. 점검 공지 확인
+        title, link, html, _ = await fetch_board_data(NOTICE_URL, "점검 안내")
+        if title and title != last_notice_title:
+            channel = bot.get_channel(NOTICE_CHANNEL_ID)
+            if channel:
+                time_info = extract_maintenance_time(html)
+                msg = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}" if time_info else f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
+                await channel.send(msg)
+            last_notice_title = title
 
-            # 2. 패치노트 확인
-            title_up, link_up, _, _ = await fetch_board_data(session, UPDATE_URL, "패치노트")
-            if title_up and title_up != last_update_title:
-                channel = bot.get_channel(UPDATE_CHANNEL_ID)
-                if channel:
-                    await channel.send(f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})")
-                last_update_title = title_up
+        # 2. 패치노트 확인
+        title_up, link_up, _, _ = await fetch_board_data(UPDATE_URL, "패치노트")
+        if title_up and title_up != last_update_title:
+            channel = bot.get_channel(UPDATE_CHANNEL_ID)
+            if channel:
+                await channel.send(f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title_up}({link_up})")
+            last_update_title = title_up
     except Exception as e:
         print(f"[루프 방어 로그] 에러 발생(루프 유지됨): {e}")
 
@@ -199,30 +195,28 @@ async def news_error_handler(error):
 
 # ==================== [ 커맨드 테스트 로직 ] ====================
 async def run_notice_test():
-    async with aiohttp.ClientSession() as session:
-        title, link, html, status = await fetch_board_data(session, NOTICE_URL, "점검 안내")
-        if not title:
-            return False, f"❌ [실패] 통신 상태 코드: {status} (사이트 접근 거부 또는 응답 없음)"
-        
-        channel = bot.get_channel(NOTICE_CHANNEL_ID)
-        if channel:
-            time_info = extract_maintenance_time(html)
-            msg = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}" if time_info else f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
-            await channel.send(msg)
-            return True, "✅ '점검 안내' 테스트 발송 성공!"
-        return False, "❌ 채널을 찾을 수 없습니다."
+    title, link, html, status = await fetch_board_data(NOTICE_URL, "점검 안내")
+    if not title:
+        return False, f"❌ [실패] 통신 상태 코드: {status} (클라우드플레어 차단 또는 응답 없음)"
+    
+    channel = bot.get_channel(NOTICE_CHANNEL_ID)
+    if channel:
+        time_info = extract_maintenance_time(html)
+        msg = f"@everyone 📢 **[플래닛 점검안내]**\n{time_info}\n🔗 {link}" if time_info else f"@everyone 📢 **[플래닛 점검안내]**\n**제목:** {title}\n🔗 {link}"
+        await channel.send(msg)
+        return True, "✅ '점검 안내' 테스트 발송 성공!"
+    return False, "❌ 채널을 찾을 수 없습니다."
 
 async def run_update_test():
-    async with aiohttp.ClientSession() as session:
-        title, link, html, status = await fetch_board_data(session, UPDATE_URL, "패치노트")
-        if not title:
-            return False, f"❌ [실패] 통신 상태 코드: {status} (사이트 접근 거부 또는 응답 없음)"
-        
-        channel = bot.get_channel(UPDATE_CHANNEL_ID)
-        if channel:
-            await channel.send(f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title}({link})")
-            return True, "✅ '패치노트' 테스트 발송 성공!"
-        return False, "❌ 채널을 찾을 수 없습니다."
+    title, link, html, status = await fetch_board_data(UPDATE_URL, "패치노트")
+    if not title:
+        return False, f"❌ [실패] 통신 상태 코드: {status} (클라우드플레어 차단 또는 응답 없음)"
+    
+    channel = bot.get_channel(UPDATE_CHANNEL_ID)
+    if channel:
+        await channel.send(f"@everyone 🛠️ **[플래닛 패치노트안내]**\n{title}({link})")
+        return True, "✅ '패치노트' 테스트 발송 성공!"
+    return False, "❌ 채널을 찾을 수 없습니다."
 
 # ==================== [ 슬래시 & 일반 커맨드 ] ====================
 @bot.tree.command(name="공지테스트")
@@ -254,6 +248,50 @@ async def test_update_cmd(ctx):
         return
     _, msg = await run_update_test()
     await ctx.send(msg)
+
+# ==================== [ 봇 복구 및 상태 확인 커맨드 ] ====================
+async def run_refresh_bot():
+    try:
+        if check_maple_planet_news.is_running():
+            check_maple_planet_news.cancel()
+        await asyncio.sleep(1)
+        check_maple_planet_news.start()
+        return True, "🔄 봇의 백그라운드 크롤링 루프가 성공적으로 재시작되었습니다!"
+    except Exception as e:
+        return False, f"❌ 복구 중 오류 발생: {e}"
+
+@bot.tree.command(name="봇새로고침", description="먹통이 된 봇의 루프 및 백그라운드 작업을 재시작합니다.")
+async def refresh_bot_slash(interaction: discord.Interaction):
+    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
+        return await interaction.response.send_message("❌ 테스트 채널 전용입니다.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    _, msg = await run_refresh_bot()
+    await interaction.followup.send(msg, ephemeral=True)
+
+@bot.command(name="봇새로고침")
+async def refresh_bot_cmd(ctx):
+    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
+        return
+    _, msg = await run_refresh_bot()
+    await ctx.send(msg)
+
+@bot.tree.command(name="봇상태", description="현재 봇의 백그라운드 루프 실행 여부를 확인합니다.")
+async def bot_status_slash(interaction: discord.Interaction):
+    if interaction.channel_id != TEST_COMMAND_CHANNEL_ID:
+        return await interaction.response.send_message("❌ 테스트 채널 전용입니다.", ephemeral=True)
+    is_running = check_maple_planet_news.is_running()
+    status_text = "🟢 정상 작동 중 (루프 실행 중)" if is_running else "🔴 먹통 상태 (루프 멈춤)"
+    embed = discord.Embed(title="🤖 봇 상태 확인", description=status_text, color=discord.Color.green() if is_running else discord.Color.red())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.command(name="봇상태")
+async def bot_status_cmd(ctx):
+    if ctx.channel.id != TEST_COMMAND_CHANNEL_ID:
+        return
+    is_running = check_maple_planet_news.is_running()
+    status_text = "🟢 정상 작동 중 (루프 실행 중)" if is_running else "🔴 먹통 상태 (루프 멈춤)"
+    embed = discord.Embed(title="🤖 봇 상태 확인", description=status_text, color=discord.Color.green() if is_running else discord.Color.red())
+    await ctx.send(embed=embed)
 
 # ==================== [ 60분 미입력 추방 타이머 ] ====================
 async def start_join_timer(member: discord.Member, channel: discord.TextChannel):
