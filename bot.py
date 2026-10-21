@@ -322,13 +322,29 @@ async def start_join_timer(member: discord.Member, channel: discord.TextChannel)
 # ==================== [ 이벤트 처리 ] ====================
 @bot.event
 async def on_ready():
+    global last_notice_title, last_update_title
     print(f"구동 완료: {bot.user.name}")
+    
+    # 봇이 켜질 때 최신 공지/패치노트 제목을 먼저 읽어와서 중복 발송 방지
+    try:
+        notice_title, _, _, _ = await fetch_board_data(NOTICE_URL, "점검 안내")
+        if notice_title:
+            last_notice_title = notice_title
+            
+        update_title, _, _, _ = await fetch_board_data(UPDATE_URL, "패치노트")
+        if update_title:
+            last_update_title = update_title
+        print("✅ 최신 공지 및 패치노트 기준점 동기화 완료 (중복 발송 방지)")
+    except Exception as e:
+        print(f"⚠️ 기준점 동기화 중 예외 발생: {e}")
+
     for guild in bot.guilds:
         try:
             bot.tree.copy_global_to(guild=guild)
             await bot.tree.sync(guild=guild)
         except Exception:
             pass
+            
     if not check_maple_planet_news.is_running():
         check_maple_planet_news.start()
 
